@@ -111,43 +111,41 @@ async def ensure_zep_user_exists(user_id: str) -> bool:
 
 async def add_message_and_get_context(
     user_id: str,
-    conversation_id: str,
+    session_id: str,
     user_message: str
 ) -> Optional[str]:
     """
-    Add the user message to Zep and get context in a single optimized call.
-
-    PERFORMANCE OPTIMIZATION: Uses return_context=True to get Zep's full context
-    block directly from add_messages(), eliminating the need for separate
-    get_user_context() or graph.search() calls. The returned context block
-    already includes relevant facts from the user's graph.
+    Add the user message to Zep and get context.
 
     Returns:
-        The context block string, or None if unavailable.
+        The context string, or None if unavailable.
     """
-    # Ensure thread exists first
-    thread_exists = await ensure_zep_thread_exists(conversation_id, user_id)
-    if not thread_exists:
+    # Ensure session exists first
+    session_exists = await ensure_zep_session_exists(session_id, user_id)
+    if not session_exists:
+        logger.error(f"Could not create/verify session {session_id}")
         return None
 
     # Create the user message
-    message = Message(role="user", content=user_message)
+    message = Message(role="user", role_type="user", content=user_message)
 
     try:
-        # Add message and get context in single call (performance optimization)
-        # return_context=True returns Zep's full context block which includes
-        # relevant facts from the user's graph - no separate search needed
-        logger.info(f"Adding message to thread {conversation_id}: {user_message[:50]}...")
-        memory_response = await zep_client.thread.add_messages(
-            thread_id=conversation_id,
-            messages=[message],
-            return_context=True
-        )
-        logger.info(f"Message added successfully to thread {conversation_id}")
+        # Add message to Zep memory
+        logger.info(f"Adding message to session {session_id}: {user_message[:50]}...")
+        await zep_client.memory.add(session_id=session_id, messages=[message])
+        logger.info(f"Message added successfully to session {session_id}")
 
-        if memory_response and memory_response.context:
-            logger.info(f"Got context from Zep: {str(memory_response.context)[:200]}...")
-            return memory_response.context
+        # Get memory/context for this session
+        try:
+            memory = await zep_client.memory.get(session_id=session_id)
+            if memory and memory.context:
+                logger.info(f"Got context from Zep: {memory.context[:200]}...")
+                return memory.context
+            elif memory and memory.summary:
+                logger.info(f"Got summary from Zep: {memory.summary.content[:200] if memory.summary.content else 'empty'}...")
+                return memory.summary.content if memory.summary else None
+        except Exception as ctx_error:
+            logger.warning(f"Could not get context for session {session_id}: {ctx_error}")
 
         logger.info("No context returned from Zep")
         return None
@@ -157,21 +155,21 @@ async def add_message_and_get_context(
         return None
 
 
-async def ensure_zep_thread_exists(thread_id: str, user_id: str) -> bool:
-    """Ensure the thread exists in Zep, creating if necessary."""
+async def ensure_zep_session_exists(session_id: str, user_id: str) -> bool:
+    """Ensure the session exists in Zep, creating if necessary."""
     try:
-        await zep_client.thread.get(thread_id=thread_id)
-        logger.info(f"Thread {thread_id} already exists")
+        await zep_client.memory.get_session(session_id=session_id)
+        logger.info(f"Session {session_id} already exists")
         return True
     except Exception as get_error:
-        logger.info(f"Thread {thread_id} not found, creating... (error: {get_error})")
+        logger.info(f"Session {session_id} not found, creating... (error: {get_error})")
         try:
-            await zep_client.thread.create(thread_id=thread_id, user_id=user_id)
-            logger.info(f"Thread {thread_id} created successfully for user {user_id}")
+            await zep_client.memory.add_session(session_id=session_id, user_id=user_id)
+            logger.info(f"Session {session_id} created successfully for user {user_id}")
             return True
         except Exception as e:
-            logger.error(f"Failed to create thread {thread_id}: {e}")
-            # Thread might already exist (race condition), that's ok
+            logger.error(f"Failed to create session {session_id}: {e}")
+            # Session might already exist (race condition), that's ok
             if "already exists" in str(e).lower() or "conflict" in str(e).lower():
                 return True
             return False
@@ -179,32 +177,30 @@ async def ensure_zep_thread_exists(thread_id: str, user_id: str) -> bool:
 
 async def persist_message_to_zep(
     user_id: str,
-    conversation_id: str,
+    session_id: str,
     role: str,
     content: str
 ) -> None:
     """
     Persist a message to Zep for memory extraction.
 
-    This adds the message to a Zep thread, which will trigger
+    This adds the message to a Zep session, which will trigger
     automatic fact extraction and graph updates.
     """
     try:
-        # Ensure thread exists first
-        thread_exists = await ensure_zep_thread_exists(conversation_id, user_id)
-        if not thread_exists:
-            logger.error(f"Cannot persist {role} message - thread {conversation_id} doesn't exist")
+        # Ensure session exists first
+        session_exists = await ensure_zep_session_exists(session_id, user_id)
+        if not session_exists:
+            logger.error(f"Cannot persist {role} message - session {session_id} doesn't exist")
             return
 
-        # Create message with the correct format for Zep thread API
-        message = Message(role=role, content=content)
+        # Create message with the correct format for Zep memory API
+        role_type = "assistant" if role == "assistant" else "user"
+        message = Message(role=role, role_type=role_type, content=content)
 
-        # Add message to thread
-        await zep_client.thread.add_messages(
-            thread_id=conversation_id,
-            messages=[message]
-        )
-        logger.info(f"Persisted {role} message to thread {conversation_id}: {content[:50]}...")
+        # Add message to session
+        await zep_client.memory.add(session_id=session_id, messages=[message])
+        logger.info(f"Persisted {role} message to session {session_id}: {content[:50]}...")
 
     except Exception as e:
         logger.error(f"Failed to persist {role} message to Zep: {e}")
