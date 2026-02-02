@@ -350,9 +350,14 @@ async def chat_completions(request: Request):
     try:
         # Parse the incoming request
         body = await request.json()
-
+        
+        # DEBUG: Log the entire request body structure
+        logger.info(f"Received request body keys: {list(body.keys())}")
+        
         # Extract from elevenlabs_extra_body (this is where customLlmExtraBody ends up)
         extra_body = body.get("elevenlabs_extra_body", {})
+        logger.info(f"elevenlabs_extra_body: {extra_body}")
+        
         user_id = extra_body.get("user_id")
         conversation_id = extra_body.get("conversation_id")
 
@@ -364,11 +369,15 @@ async def chat_completions(request: Request):
 
         # Validate required fields
         if not user_id:
+            logger.error(f"No user_id in request. Extra body: {extra_body}")
             raise HTTPException(status_code=400, detail="user_id is required in elevenlabs_extra_body")
 
         if not conversation_id:
+            logger.error(f"No conversation_id in request. Extra body: {extra_body}")
             raise HTTPException(status_code=400, detail="conversation_id is required")
 
+        logger.info(f"Processing request for user_id={user_id}, conversation_id={conversation_id}")
+        
         # Ensure user exists in Zep
         await ensure_zep_user_exists(user_id)
 
