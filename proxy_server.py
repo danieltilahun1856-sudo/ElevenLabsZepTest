@@ -136,16 +136,35 @@ async def add_message_and_get_context(
         logger.info(f"Message added successfully to session {session_id}")
 
         # Get memory/context for this session
+        context_parts = []
+        
+        # First, try to get user-level facts (persisted across sessions)
+        try:
+            user_facts = await zep_client.user.get_facts(user_id=user_id)
+            if user_facts and user_facts.facts:
+                facts_text = "\n".join([f"- {fact.fact}" for fact in user_facts.facts])
+                logger.info(f"Got {len(user_facts.facts)} user facts from Zep")
+                context_parts.append(f"Known facts about this user:\n{facts_text}")
+        except Exception as facts_error:
+            logger.warning(f"Could not get user facts: {facts_error}")
+        
+        # Then get session context
         try:
             memory = await zep_client.memory.get(session_id=session_id)
             if memory and memory.context:
-                logger.info(f"Got context from Zep: {memory.context[:200]}...")
-                return memory.context
+                logger.info(f"Got session context from Zep: {memory.context[:200]}...")
+                context_parts.append(memory.context)
             elif memory and memory.summary:
-                logger.info(f"Got summary from Zep: {memory.summary.content[:200] if memory.summary.content else 'empty'}...")
-                return memory.summary.content if memory.summary else None
+                logger.info(f"Got summary from Zep")
+                if memory.summary.content:
+                    context_parts.append(f"Conversation summary: {memory.summary.content}")
         except Exception as ctx_error:
-            logger.warning(f"Could not get context for session {session_id}: {ctx_error}")
+            logger.warning(f"Could not get session context: {ctx_error}")
+        
+        if context_parts:
+            combined_context = "\n\n".join(context_parts)
+            logger.info(f"Combined context length: {len(combined_context)} chars")
+            return combined_context
 
         logger.info("No context returned from Zep")
         return None
