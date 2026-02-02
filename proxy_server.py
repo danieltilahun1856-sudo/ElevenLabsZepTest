@@ -116,62 +116,71 @@ async def add_message_and_get_context(
 ) -> Optional[str]:
     """
     Add the user message to Zep and get context.
+    Always tries to get user facts even if message storage fails.
 
     Returns:
         The context string, or None if unavailable.
     """
-    # Ensure session exists first
+    context_parts = []
+    
+    # FIRST: Always try to get user-level facts (these persist across sessions)
+    # This runs even if session creation or message storage fails
+    try:
+        user_facts = await zep_client.user.get_facts(user_id=user_id)
+        if user_facts and user_facts.facts:
+            facts_text = "\n".join([f"- {fact.fact}" for fact in user_facts.facts])
+            logger.info(f"Got {len(user_facts.facts)} user facts from Zep")
+            context_parts.append(f"IMPORTANT - Known facts about this user:\n{facts_text}")
+        else:
+            logger.info(f"No user facts found for {user_id}")
+    except Exception as facts_error:
+        logger.warning(f"Could not get user facts: {facts_error}")
+
+    # SECOND: Ensure session exists
     session_exists = await ensure_zep_session_exists(session_id, user_id)
     if not session_exists:
         logger.error(f"Could not create/verify session {session_id}")
-        return None
-
-    # Create the user message
-    message = Message(role="user", role_type="user", content=user_message)
-
-    try:
-        # Add message to Zep memory
-        logger.info(f"Adding message to session {session_id}: {user_message[:50]}...")
-        await zep_client.memory.add(session_id=session_id, messages=[message])
-        logger.info(f"Message added successfully to session {session_id}")
-
-        # Get memory/context for this session
-        context_parts = []
-        
-        # First, try to get user-level facts (persisted across sessions)
-        try:
-            user_facts = await zep_client.user.get_facts(user_id=user_id)
-            if user_facts and user_facts.facts:
-                facts_text = "\n".join([f"- {fact.fact}" for fact in user_facts.facts])
-                logger.info(f"Got {len(user_facts.facts)} user facts from Zep")
-                context_parts.append(f"Known facts about this user:\n{facts_text}")
-        except Exception as facts_error:
-            logger.warning(f"Could not get user facts: {facts_error}")
-        
-        # Then get session context
-        try:
-            memory = await zep_client.memory.get(session_id=session_id)
-            if memory and memory.context:
-                logger.info(f"Got session context from Zep: {memory.context[:200]}...")
-                context_parts.append(memory.context)
-            elif memory and memory.summary:
-                logger.info(f"Got summary from Zep")
-                if memory.summary.content:
-                    context_parts.append(f"Conversation summary: {memory.summary.content}")
-        except Exception as ctx_error:
-            logger.warning(f"Could not get session context: {ctx_error}")
-        
+        # Still return user facts if we have them
         if context_parts:
-            combined_context = "\n\n".join(context_parts)
-            logger.info(f"Combined context length: {len(combined_context)} chars")
-            return combined_context
-
-        logger.info("No context returned from Zep")
+            return "\n\n".join(context_parts)
         return None
 
-    except Exception as e:
-        logger.error(f"Failed to add message to Zep: {e}")
-        return None
+    # THIRD: Try to add message (with retry for 503 errors)
+    message = Message(role="user", role_type="user", content=user_message)
+    
+    for attempt in range(3):  # Retry up to 3 times
+        try:
+            logger.info(f"Adding message to session {session_id} (attempt {attempt + 1}): {user_message[:50]}...")
+            await zep_client.memory.add(session_id=session_id, messages=[message])
+            logger.info(f"Message added successfully to session {session_id}")
+            break
+        except Exception as e:
+            if "503" in str(e) and attempt < 2:
+                logger.warning(f"Zep 503 error, retrying in 1 second... (attempt {attempt + 1})")
+                await asyncio.sleep(1)
+            else:
+                logger.error(f"Failed to add message to Zep: {e}")
+                # Continue to get session context anyway
+
+    # FOURTH: Try to get session context
+    try:
+        memory = await zep_client.memory.get(session_id=session_id)
+        if memory and memory.context:
+            logger.info(f"Got session context from Zep: {memory.context[:200]}...")
+            context_parts.append(memory.context)
+        elif memory and memory.summary and memory.summary.content:
+            logger.info(f"Got summary from Zep")
+            context_parts.append(f"Conversation summary: {memory.summary.content}")
+    except Exception as ctx_error:
+        logger.warning(f"Could not get session context: {ctx_error}")
+    
+    if context_parts:
+        combined_context = "\n\n".join(context_parts)
+        logger.info(f"Combined context length: {len(combined_context)} chars")
+        return combined_context
+
+    logger.info("No context returned from Zep")
+    return None
 
 
 async def ensure_zep_session_exists(session_id: str, user_id: str) -> bool:
