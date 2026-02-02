@@ -137,18 +137,23 @@ async def add_message_and_get_context(
         # Add message and get context in single call (performance optimization)
         # return_context=True returns Zep's full context block which includes
         # relevant facts from the user's graph - no separate search needed
+        logger.info(f"Adding message to thread {conversation_id}: {user_message[:50]}...")
         memory_response = await zep_client.thread.add_messages(
             thread_id=conversation_id,
             messages=[message],
             return_context=True
         )
+        logger.info(f"Message added successfully to thread {conversation_id}")
 
         if memory_response and memory_response.context:
+            logger.info(f"Got context from Zep: {str(memory_response.context)[:200]}...")
             return memory_response.context
 
+        logger.info("No context returned from Zep")
         return None
 
-    except Exception:
+    except Exception as e:
+        logger.error(f"Failed to add message to Zep: {e}")
         return None
 
 
@@ -156,12 +161,16 @@ async def ensure_zep_thread_exists(thread_id: str, user_id: str) -> bool:
     """Ensure the thread exists in Zep, creating if necessary."""
     try:
         await zep_client.thread.get(thread_id=thread_id)
+        logger.info(f"Thread {thread_id} already exists")
         return True
-    except Exception:
+    except Exception as get_error:
+        logger.info(f"Thread {thread_id} not found, creating... (error: {get_error})")
         try:
             await zep_client.thread.create(thread_id=thread_id, user_id=user_id)
+            logger.info(f"Thread {thread_id} created successfully for user {user_id}")
             return True
         except Exception as e:
+            logger.error(f"Failed to create thread {thread_id}: {e}")
             # Thread might already exist (race condition), that's ok
             if "already exists" in str(e).lower() or "conflict" in str(e).lower():
                 return True
@@ -184,6 +193,7 @@ async def persist_message_to_zep(
         # Ensure thread exists first
         thread_exists = await ensure_zep_thread_exists(conversation_id, user_id)
         if not thread_exists:
+            logger.error(f"Cannot persist {role} message - thread {conversation_id} doesn't exist")
             return
 
         # Create message with the correct format for Zep thread API
@@ -194,10 +204,10 @@ async def persist_message_to_zep(
             thread_id=conversation_id,
             messages=[message]
         )
+        logger.info(f"Persisted {role} message to thread {conversation_id}: {content[:50]}...")
 
-    except Exception:
-        # Silently fail - don't interrupt the response stream
-        pass
+    except Exception as e:
+        logger.error(f"Failed to persist {role} message to Zep: {e}")
 
 
 def inject_context_into_messages(messages: list, zep_context: str) -> list:
@@ -380,6 +390,11 @@ async def chat_completions(request: Request):
             zep_context = await add_message_and_get_context(
                 user_id, conversation_id, user_message
             )
+            # DEBUG: Log what context we got from Zep
+            if zep_context:
+                logger.info(f"Zep context retrieved for user {user_id}: {zep_context[:500]}...")
+            else:
+                logger.info(f"No Zep context available for user {user_id}")
         else:
             # No user message - this shouldn't normally happen
             zep_context = None
